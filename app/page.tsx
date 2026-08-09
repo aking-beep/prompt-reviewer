@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ReviewForm, parseToolsText } from "@/components/ReviewForm";
+import { AccessGate, loadStoredAccess, type AccessProfile } from "@/components/AccessGate";
+import { ReviewForm, parseToolsText, type ReviewFormValues } from "@/components/ReviewForm";
 import { Report } from "@/components/Report";
 import type { ReviewReport } from "@/lib/prompt/types";
 import {
@@ -14,18 +15,61 @@ import {
 } from "@/lib/version";
 
 export default function Home() {
+  const [access, setAccess] = useState<AccessProfile | null>(null);
+  const [gateReady, setGateReady] = useState(false);
+  const [gateRequired, setGateRequired] = useState(true);
+  const [showGate, setShowGate] = useState(false);
+  const [pending, setPending] = useState<ReviewFormValues | null>(null);
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<ReviewReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const accessRef = useRef<AccessProfile | null>(null);
 
-  async function runReview(values: { prompt: string; toolsText: string; label: string }) {
+  useEffect(() => {
+    accessRef.current = access;
+  }, [access]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const stored = loadStoredAccess();
+      try {
+        const res = await fetch("/api/access", {
+          headers: stored?.token ? { authorization: `Bearer ${stored.token}` } : undefined,
+        });
+        const data = await res.json();
+        if (cancelled) return;
+        setGateRequired(!!data.required);
+        if (!data.required) {
+          setAccess(stored ?? { token: "", email: "", firstName: "" });
+        } else if (data.unlocked && stored) {
+          setAccess(stored);
+        } else if (data.unlocked) {
+          setAccess({ token: "", email: data.email || "", firstName: "" });
+        }
+      } catch {
+        if (!cancelled && stored) setAccess(stored);
+      } finally {
+        if (!cancelled) setGateReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function runReview(values: ReviewFormValues, profile: AccessProfile | null) {
     setLoading(true);
     setError(null);
     setReport(null);
+    setShowGate(false);
     try {
       const res = await fetch("/api/review", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...(profile?.token ? { authorization: `Bearer ${profile.token}` } : {}),
+        },
         body: JSON.stringify({
           prompt: values.prompt,
           label: values.label,
@@ -33,7 +77,15 @@ export default function Home() {
         }),
       });
       const data = await res.json();
+      if (res.status === 401 && data.code === "access_required") {
+        setAccess(null);
+        setPending(values);
+        setShowGate(true);
+        setError(null);
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Review failed");
+      setPending(null);
       setReport(data.report as ReviewReport);
       requestAnimationFrame(() => {
         document.getElementById("report")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -42,6 +94,29 @@ export default function Home() {
       setError(e instanceof Error ? e.message : "Review failed");
     } finally {
       setLoading(false);
+    }
+  }
+
+  function onSubmit(values: ReviewFormValues) {
+    const needsGate = gateRequired && !accessRef.current?.token;
+    if (needsGate) {
+      setPending(values);
+      setShowGate(true);
+      setReport(null);
+      setError(null);
+      requestAnimationFrame(() => {
+        document.getElementById("review-gate")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      return;
+    }
+    void runReview(values, accessRef.current);
+  }
+
+  function onUnlocked(profile: AccessProfile) {
+    setAccess(profile);
+    setShowGate(false);
+    if (pending) {
+      void runReview(pending, profile);
     }
   }
 
@@ -55,6 +130,8 @@ export default function Home() {
             onClick={() => {
               setReport(null);
               setError(null);
+              setShowGate(false);
+              setPending(null);
               window.scrollTo({ top: 0, behavior: "smooth" });
             }}
           >
@@ -88,7 +165,7 @@ export default function Home() {
               <p className="text-sub max-w-2xl leading-relaxed">
                 Paste a prompt and get structured feedback on clarity, injection surface, ambiguity, and failure
                 modes — the review a senior engineer would give, minus the wait. Scores are heuristic and
-                reproducible: no model call, nothing logged.
+                reproducible: no model call.
               </p>
               <ul className="grid sm:grid-cols-2 gap-2 text-sm text-sub">
                 {CURRENT_CHECKS.map((c) => (
@@ -100,8 +177,24 @@ export default function Home() {
               </ul>
             </section>
 
-            <ReviewForm loading={loading} onSubmit={runReview} />
+            {!gateReady && <div className="card p-5 text-sm text-sub">Loading…</div>}
+
+            {gateReady && (
+              <>
+                {access?.firstName && access.token && (
+                  <p className="text-xs text-sub">
+                    Signed in as {access.firstName} ({access.email}). Free reviews are rate-limited to protect the
+                    service.
+                  </p>
+                )}
+                <ReviewForm loading={loading} onSubmit={onSubmit} />
+              </>
+            )}
           </>
+        )}
+
+        {showGate && (
+          <AccessGate onUnlocked={onUnlocked} />
         )}
 
         {loading && (
@@ -113,9 +206,7 @@ export default function Home() {
           </div>
         )}
 
-        {error && (
-          <div className="card p-4 border-bad/40 text-sm text-bad">{error}</div>
-        )}
+        {error && <div className="card p-4 border-bad/40 text-sm text-bad">{error}</div>}
 
         {report && (
           <div id="report" className="space-y-4">
@@ -126,6 +217,8 @@ export default function Home() {
                 onClick={() => {
                   setReport(null);
                   setError(null);
+                  setShowGate(false);
+                  setPending(null);
                 }}
               >
                 ← Review another

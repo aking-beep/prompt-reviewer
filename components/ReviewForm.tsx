@@ -96,10 +96,13 @@ export function ReviewForm({
         />
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-3">
         <button type="submit" className="btn-primary" disabled={loading || !prompt.trim()}>
           {loading ? "Reviewing…" : "Review prompt"}
         </button>
+        <p className="text-[11px] text-sub">
+          Results unlock after a one-time signup (same as the MCP scanner).
+        </p>
       </div>
     </form>
   );
